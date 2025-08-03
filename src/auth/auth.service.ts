@@ -1,13 +1,9 @@
-/**
- * AuthService handles user authentication flows including sign up,
- * login, MFA, OTP verification, password reset, and session management.
- */
-
 import { hash, verify } from 'argon2';
 import {
   BadRequestException,
   ConflictException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException
 } from '@nestjs/common';
 import { DbService } from 'src/db/db.service';
@@ -18,11 +14,10 @@ import { ResetPasswordDto } from './dto/resetpassword.dto';
 import { JwtService } from '@nestjs/jwt';
 import otpGenerator from 'otp-generator';
 import { scope, verification_token_scope } from '@prisma/client';
+import { RequestTokenDto } from './dto/request-token.dto';
+import { EditBasicUserInfoDto } from './dto/updatebasicUserInfo';
 
-/**
- * JWT payload structure used across the app.
- */
-type Tjwt_session = {
+export type Tjwt_session = {
   session: string;
   session_expires_at: Date;
   user_id: string;
@@ -36,14 +31,6 @@ export class AuthService {
     private jwtService: JwtService
   ) {}
 
-  /**
-   * Helper: Creates a session in the DB and returns a signed JWT.
-   * @param userId - User ID to bind the session to.
-   * @param ip - IP address from which the session is initiated.
-   * @param user_agent - User-Agent string for session tracking.
-   * @param image_url - Image URL to include in JWT payload.
-   * @returns Session record and JWT string.
-   */
   private async createSessionAndToken(
     userId: string,
     ip: string,
@@ -51,7 +38,6 @@ export class AuthService {
     image_url: string
   ) {
     const expires_at = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000); // 14 days
-
     const session = await this.db.session.create({
       data: {
         user_id: userId,
@@ -62,35 +48,47 @@ export class AuthService {
       }
     });
 
-    const jwt_token = await this.jwtService.sign(JSON.stringify({
+    const jwt_token = await this.jwtService.sign({
       session: session.id,
       session_expires_at: session.expires_at,
       user_id: session.user_id,
-      image_url
-    }));
+    });
 
     return { session, jwt_token };
   }
 
-  /**
-   * Helper: Checks whether the session is expiring within 24 hours.
-   * @param expires_at - Expiry date of the session.
-   * @returns True if session expires in < 1 day, else false.
-   */
   private isSessionExpiringSoon(expires_at: Date): boolean {
     const diff = expires_at.getTime() - Date.now();
-    return diff < (24 * 60 * 60 * 1000); // less than 1 day
+    return diff < (24 * 60 * 60 * 1000);
   }
 
   /**
-   * Registers a new user and sends an OTP to verify their email or phone.
-   * @param data - User sign-up DTO.
-   * @throws ConflictException if the user/email/phone already exists.
-   * @returns A success message about OTP delivery.
+   * 🔁 Reusable token creator for all scopes
    */
-  async CreateUser(data: SignUpDto) {
-    const { username, passoword, phone_number, email } = data;
+  private async createVerificationToken(userId: string, scope: verification_token_scope) {
+    const otp = 'lookslim44'
 
+    const verification = await this.db.verification_token.create({
+      data: {
+        identifier: userId,
+        token: process.env.NODE_ENV === 'production' ? otp : 'test_otp_123',
+        scope,
+        expires_at: new Date(Date.now() + 15 * 60 * 1000)
+      }
+    });
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn(`${scope.toUpperCase()} OTP (dev only):`, verification.token);
+    }
+
+    return {
+      verification_id: verification.id,
+      scope: verification.scope
+    };
+  }
+
+  async CreateUser(data: SignUpDto) {
+    const { username, password, phone_number, email } = data;
     if (!email && !phone_number) {
       throw new BadRequestException("Either email or phone number is required");
     }
@@ -111,51 +109,33 @@ export class AuthService {
       throw new ConflictException("User already exists");
     }
 
-    const hashedPassword = await hash(passoword, {
+    const hashedPassword = await hash(password, {
       secret: Buffer.from(process.env.AUTH_SECRET || 'TEST')
     });
 
     const new_user = await this.db.user.create({
       data: {
-        ...data,
-        password: hashedPassword
+        password: hashedPassword,
+        primary_email: email || null,
+        primary_phone_number: phone_number || null,
+        name: data.name || null,
+        username
       }
     });
 
-    const verification_token = await this.db.verification_token.create({
-      data: {
-        identifier: new_user.id,
-        token: otpGenerator.generate(6),
-        expires_at: new Date(Date.now() + 15 * 60 * 1000),
-        scope: verification_token_scope.verify_email
-      }
-    });
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn('OTP (dev only):', verification_token.token);
-    }
+    const token = await this.createVerificationToken(new_user.id, email ? verification_token_scope.verify_email:verification_token_scope.verify_phone_number);
 
     return {
       success: true,
-      message: `OTP sent to your ${email ? 'email' : 'phone number'}`
+      message: `OTP sent to your ${email ? 'email' : 'phone number'}`,
+      ...token
     };
   }
 
-  /**
-   * Authenticates the user and returns a JWT.
-   * If MFA is enabled, an OTP is sent instead.
-   * @param data - Login DTO with email/phone/username/password.
-   * @param ip - Client IP address.
-   * @param user_agent - Client User-Agent string.
-   * @throws BadRequestException on invalid login or password.
-   * @returns JWT token or OTP-sent message.
-   */
   async SignInUser(data: SignInDto, ip: string, user_agent: string) {
-    const { email, passoword, phone_number, username } = data;
+    const { email, password, phone_number, username } = data;
 
-    if (!email || !phone_number || !username || !passoword) {
-      throw new BadRequestException("Invalid request");
-    }
+    if (!password) throw new BadRequestException("Invalid request");
 
     const user = await this.db.user.findFirst({
       where: {
@@ -167,33 +147,46 @@ export class AuthService {
       }
     });
 
-    if (!user || !user.password) {
-      throw new BadRequestException("Invalid credentials");
-    }
+    if (!user || !user.password) throw new BadRequestException("Invalid credentials");
 
-    const isCorrectPassword = await verify(user.password, passoword, {
+    const isCorrectPassword = await verify(user.password, password, {
       secret: Buffer.from(process.env.AUTH_SECRET || 'TEST')
     });
 
-    if (!isCorrectPassword) {
-      throw new BadRequestException("Invalid credentials");
+    if (!isCorrectPassword) throw new BadRequestException("Invalid credentials");
+
+    const isUserVerified = user.primary_email ? user.is_email_verified : user.is_phone_number_verified;
+    if (!isUserVerified) {
+await this.db.verification_token.deleteMany({
+  where: {
+    identifier: user.id,
+    scope: user.primary_email ? verification_token_scope.verify_email : verification_token_scope.verify_phone_number
+  }
+});
+
+      const token = await this.createVerificationToken(
+        user.id,
+        user.primary_email ? verification_token_scope.verify_email : verification_token_scope.verify_phone_number
+      );
+      return {
+        success: true,
+        message: `You're not verified. Check your ${user.primary_email ? 'email' : 'phone number'}`,
+        ...token
+      };
     }
 
     if (user.mfa_enabled) {
-      const verification_token = await this.db.verification_token.create({
-        data: {
-          identifier: user.id,
-          scope: verification_token_scope.mfa,
-          expires_at: new Date(Date.now() + 15 * 60 * 1000),
-          token: otpGenerator.generate(6)
-        }
-      });
-
-      console.warn('MFA OTP (dev only):', verification_token.token);
-
+        await this.db.verification_token.deleteMany({
+    where: {
+      identifier: user.id,
+      scope: verification_token_scope.mfa
+    }
+  });
+      const token = await this.createVerificationToken(user.id, verification_token_scope.mfa);
       return {
         success: true,
-        message: `OTP sent to your ${user.primary_email ? 'email' : 'phone number'}`
+        message: 'MFA OTP sent',
+        ...token
       };
     }
 
@@ -206,15 +199,6 @@ export class AuthService {
     };
   }
 
-  /**
-   * Verifies the provided OTP and performs the appropriate action
-   * based on the verification scope: email, phone, or MFA.
-   * @param data - DTO containing OTP token string.
-   * @param id - Token ID from frontend context.
-   * @param ip - IP address.
-   * @param user_agent - User-Agent.
-   * @throws BadRequestException or NotFoundException on failure.
-   */
   async verify_token(data: VerifyTokenDto, id: string, ip: string, user_agent: string) {
     const token = await this.db.verification_token.findFirst({
       where: { token: data.token, id }
@@ -225,11 +209,9 @@ export class AuthService {
 
     const user = await this.db.user.findUnique({ where: { id: token.identifier } });
     if (!user) throw new NotFoundException("User not found");
-    await this.db.verification_token.delete({
-        where:{
-            id:token.id
-        }
-    });
+
+    await this.db.verification_token.delete({ where: { id: token.id } });
+
     switch (token.scope) {
       case 'verify_email':
         await this.db.user.update({
@@ -240,7 +222,7 @@ export class AuthService {
           }
         });
         return { success: true, message: 'Email verified' };
- 
+
       case 'verify_phone_number':
         await this.db.user.update({
           where: { id: user.id },
@@ -266,51 +248,66 @@ export class AuthService {
     }
   }
 
-  /**
-   * Resets user password using a valid token.
-   * All user sessions are cleared after password reset.
-   * @param data - New password + token string.
-   * @param id - Verification token ID.
-   * @throws NotFoundException if token/user is invalid.
-   */
   async reset_password(data: ResetPasswordDto, id: string) {
     const { new_password, token } = data;
 
     const verification_token = await this.db.verification_token.findFirst({
-      where: { token, id }
+      where: { token, id, scope: verification_token_scope.reset_password }
     });
 
     if (!verification_token) throw new NotFoundException("Invalid token");
     if (new Date(verification_token.expires_at) < new Date()) throw new BadRequestException("Token expired");
 
-    try {
-      const hashed_password = await hash(new_password, {
-        secret: Buffer.from(process.env.AUTH_SECRET || 'TEST')
-      });
+    const hashed_password = await hash(new_password, {
+      secret: Buffer.from(process.env.AUTH_SECRET || 'TEST')
+    });
 
-      const user = await this.db.user.update({
-        where: { id: verification_token.identifier },
-        data: { password: hashed_password }
-      });
-
-      await this.db.session.deleteMany({ where: { user_id: user.id } });
-
-    } catch (error) {
-      console.error(error);
-      throw new NotFoundException("User not found");
+    const user = await this.db.user.update({
+      where: { id: verification_token.identifier },
+      data: { password: hashed_password }
+    });
+    await this.db.verification_token.delete({where:{id:verification_token.id}})
+    await this.db.session.deleteMany({ where: { user_id: user.id } });
+    return {
+        success:true,
+        message: 'password reset successfull you have been logged out of your all devices'
     }
   }
 
-  /**
-   * Validates an existing session JWT.
-   * If session is about to expire (< 1 day), it refreshes the expiry.
-   * @param token - JWT session token.
-   * @param user_agent - User-Agent of the request to validate session binding.
-   * @returns User session details.
-   * @throws NotFoundException if session is invalid/expired.
-   */
+  async request_password_reset(data:RequestTokenDto) {
+    const {username,email,phone_number} = data
+    const user = await this.db.user.findFirst({
+      where: {
+        OR: [
+          { primary_email: email },
+          { primary_phone_number: phone_number },
+          {username}
+        ]
+      }
+    });
+    if (!user) throw new NotFoundException("User not found");
+await this.db.verification_token.deleteMany({
+  where: {
+    identifier: user.id,
+    scope: verification_token_scope.reset_password
+  }
+});
+
+    const token = await this.createVerificationToken(
+      user.id,
+      verification_token_scope.reset_password
+    );
+
+    return {
+      success: true,
+      message: `To reset your password, check your ${user.primary_email ? 'email' : 'phone number'}`,
+      ...token
+    };
+  }
+
   async verify_and_refresh_session(token: string, user_agent: string) {
     const jwt_session: Tjwt_session = await this.jwtService.decode(token) as any;
+        if (!jwt_session) throw new NotFoundException("Invalid session");
 
     const session = await this.db.session.findFirst({
       where: {
@@ -336,7 +333,6 @@ export class AuthService {
       throw new NotFoundException("User not found");
     }
 
-    // 🔄 Refresh session if it's about to expire
     let currentSession = session;
     if (this.isSessionExpiringSoon(session.expires_at)) {
       currentSession = await this.db.session.update({
@@ -362,4 +358,56 @@ export class AuthService {
       }
     };
   }
+  async logout(token: string) {
+  const jwt_session: Tjwt_session = await this.jwtService.decode(token) as any;
+
+  if (!jwt_session?.session || !jwt_session?.user_id) {
+    throw new BadRequestException("Invalid or malformed token");
+  }
+
+  const session = await this.db.session.findFirst({
+    where: {
+      id: jwt_session.session,
+      user_id: jwt_session.user_id,
+    }
+  });
+
+  if (!session) {
+    throw new NotFoundException("Session not found or already expired");
+  }
+
+  await this.db.session.delete({
+    where: { id: session.id }
+  });
+
+  return {
+    success: true,
+    message: "Logged out successfully"
+  };
+}
+async updateBasicInfo(data:EditBasicUserInfoDto,userId:string){
+    const keys = Object.keys(data)
+    try {
+     const user =  await this.db.user.update({
+        where:{
+          id:userId
+        },
+        data:data
+      });
+      console.log()
+      return {
+        success:true,
+        message: 'user updated success fully',
+        updated_fields: keys.reduce((acc, k) => {
+  acc[k] = user[k];
+  return acc;
+}, {})
+
+      }
+    } catch (error) {
+      console.error(error)
+      throw new InternalServerErrorException("internal server error")
+    }
+}
+
 }

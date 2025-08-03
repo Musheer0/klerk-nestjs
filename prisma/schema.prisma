@@ -35,7 +35,6 @@ model user {
   created_at               DateTime   @default(now())
   updated_at               DateTime   @updatedAt
   role                     user_role?
-  
 }
 
 enum provider {

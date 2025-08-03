@@ -3,9 +3,11 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { DbModule } from 'src/db/db.module';
 import { JwtModule } from '@nestjs/jwt';
+import { JWTStrategy } from './strategey/jwt.strategy';
+import { PassportModule, PassportStrategy } from '@nestjs/passport';
 
 @Module({
-  providers: [AuthService],
+  providers: [AuthService,JWTStrategy],
   controllers: [AuthController],
   imports:[DbModule,
     JwtModule.registerAsync({
@@ -15,7 +17,12 @@ import { JwtModule } from '@nestjs/jwt';
           expiresIn: '14d'
         }
       })
-    })
+    }),
+    PassportModule
+  ],
+  exports:[
+    JWTStrategy,
+    PassportModule
   ]
 })
 export class AuthModule {}
