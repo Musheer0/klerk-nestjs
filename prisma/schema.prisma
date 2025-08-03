@@ -1,0 +1,135 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model user {
+  id                       String     @id @default(uuid())
+  name                     String?
+  username                 String?    @unique
+  primary_email            String?    @unique
+  primary_phone_number     String?    @unique
+  image_url                String     @default("https://abs.twimg.com/sticky/default_profile_images/default_profile_400x400.png")
+  email_verified_at        DateTime?
+  password                 String?
+  phone_number_verified_at DateTime?
+  is_email_verified        Boolean    @default(false)
+  is_phone_number_verified Boolean    @default(false)
+  banned_at                DateTime?
+  is_banned                Boolean    @default(false)
+  mfa_enabled              Boolean    @default(false)
+  mfa_enabled_at           DateTime?
+  mfa_type                 mfa_type?
+  link_accounts            account[]
+  sessions                 session[]
+  created_at               DateTime   @default(now())
+  updated_at               DateTime   @updatedAt
+  role                     user_role?
+  
+}
+
+enum provider {
+  google
+  github
+}
+
+enum reason {
+  login
+  signup
+  connected_account
+}
+
+enum mfa_type {
+  phone
+  email
+}
+
+enum role_name {
+  admin
+  mod
+  user
+}
+
+model user_role {
+  user_id String    @unique
+  role    role_name @default(user)
+
+  assigned_at DateTime @default(now())
+  permissions String[] @default(["ban"])
+  user        user     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([user_id, role])
+}
+
+model account {
+  id                  String   @id @default(uuid())
+  provider            provider
+  user_id             String
+  access_token        String?
+  expires_at          Int?
+  token_type          String?
+  provider_account_id String
+  email               String
+  id_token            String?
+  linked_reason       String?
+  email_verified      Boolean  @default(false) //from oauth
+
+  refresh_token String?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  user       user     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, provider])
+  @@unique([provider, provider_account_id])
+}
+
+enum verification_token_scope {
+  mfa
+  reset_password
+  verify_email
+  verify_phone_number
+}
+
+model verification_token {
+  id                  String   @id @default(uuid())
+  identifier String
+  token      String
+  created_at DateTime                 @default(now())
+  updated_at DateTime                 @updatedAt
+  scope      verification_token_scope @default(mfa)
+  expires_at DateTime
+  @@index([expires_at])
+}
+
+enum scope {
+  EMAIL //all basic+email
+  FULL //all basic+email+user id
+  BASIC_INFO //avatar,username,created at
+}
+
+model session {
+  id         String   @id @default(uuid())
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  expires_at DateTime
+  scope      scope    @default(BASIC_INFO)
+  user_id    String
+  user       user     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  ip         String?
+  user_agent String?
+  last_used  DateTime @default(now())
+
+  @@index([expires_at])
+  @@index([user_id])
+}
