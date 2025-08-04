@@ -80,7 +80,6 @@ model account {
   provider_account_id String
   email               String
   id_token            String?
-  linked_reason       String?
   email_verified      Boolean  @default(false) //from oauth
 
   refresh_token String?

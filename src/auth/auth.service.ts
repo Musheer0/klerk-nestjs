@@ -19,6 +19,7 @@ import { EditBasicUserInfoDto } from './dto/updatebasicUserInfo';
 import { sendWhatsAppCode } from 'src/lib/send-whatsapp-code';
 import { sendEmail } from 'src/lib/send-email';
 import { otpEmailTemplate } from './email/otp-email-template';
+import { Profile } from 'passport-google-oauth20';
 
 export type Tjwt_session = {
   session: string;
@@ -495,5 +496,53 @@ async updateBasicInfo(data:EditBasicUserInfoDto,userId:string){
     throw new InternalServerErrorException("error enabling mfa")
   }
  }
- 
+ async OAuthGoogleLogin(profile:Profile,ip:string,user_agent:string){
+  if(!profile?.emails) return null
+  const already_linked_account=await this.db.account.findFirst({
+    where:{
+      provider:'google',
+      provider_account_id:profile.id,
+      email: profile.emails[0].value,
+      email_verified:profile.emails[0].verified
+    },
+    include:{
+      user:true
+    }
+  });
+  if(already_linked_account ){
+    if( already_linked_account.user.mfa_enabled){
+      const token = await this.createVerificationToken(already_linked_account.user_id,'mfa',already_linked_account.email, 'email');
+      return{
+        success:true,
+        message: 'please login using the opt sent to your email',
+        ...token
+      }
+    }
+    else{
+      const jwt_token = await this.createSessionAndToken(already_linked_account.user_id,ip,user_agent,'');
+      return jwt_token.jwt_token
+    }
+  }
+  else{
+    const user  = await this.db.user.create({
+      data:{
+        name:profile.displayName,
+        primary_email:profile.emails[0].value,
+        is_email_verified:true,
+        email_verified_at:new Date(),
+        image_url:profile.profileUrl,
+        link_accounts:{
+          create:{
+            email:profile.emails[0].value,
+            provider:'google',
+            provider_account_id: profile.id,
+            email_verified:profile.emails[0].verified
+          }
+        }
+      }
+    });
+     const jwt_token = await this.createSessionAndToken(user.id,ip,user_agent,'');
+      return jwt_token.jwt_token
+  }
+ }
 }

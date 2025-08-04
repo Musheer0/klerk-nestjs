@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Request, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Request, Res, UseGuards } from '@nestjs/common';
 import { SignUpDto } from './dto/signup.dto';
 import { AuthService } from './auth.service';
 import { SignInDto } from './dto/signin.dto';
@@ -18,12 +18,24 @@ export class AuthController {
     constructor (private readonly auth_service:AuthService){}
     @UseGuards(PublicAuthRoute)
     @Post('/sign-up')
-    signUpUser(@Body() req:SignUpDto){
-        return this.auth_service.CreateUser(req)
+    async signUpUser(@Body() req:SignUpDto,@Res() res){
+        const response =await  this.auth_service.CreateUser(req);
+        return res.redirect(`${process.env.FRONT_END!}\/verify\/${response.verification_id}?scope=${response.scope}`)
     }
     @Post('/sign-in')
-    signInUser(@Body() req:SignInDto,@GetIp()ip:string|null,@UserAgent() userAgent:string){
-      return this.auth_service.SignInUser(req,ip||'0.0.0',userAgent)
+    async signInUser(@Body() req:SignInDto,@GetIp()ip:string|null,@UserAgent() userAgent:string,@Res() res){
+      const response =await  this.auth_service.SignInUser(req,ip||'0.0.0',userAgent);
+      if(typeof response.token==='string'){
+        res.cookie('session',response.token,{
+                expires:  new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+                 httpOnly: true,         
+                 secure: true,            
+                sameSite: 'lax',         
+                path: '/',  
+            });
+            return res.redirect(process.env.FRONT_END!)
+      }
+            return res.redirect(`${process.env.FRONT_END!}\/verify\/${response.verification_id}?scope=${response.scope}`)
     }
     @Post('/verify/:id')
     verifyToken(@Body() body:VerifyTokenDto,@Param() param:{id:string},@GetIp()ip:string|null,@UserAgent() userAgent:string){

@@ -1,0 +1,7 @@
+/users:-{
+    /count,
+    /banned,
+    /:id:-{
+        /ban,/unban,/delete,/edit
+    }
+}
