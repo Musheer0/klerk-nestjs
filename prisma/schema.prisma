@@ -98,6 +98,7 @@ enum verification_token_scope {
   reset_password
   verify_email
   verify_phone_number
+  enable_mfa
 }
 
 model verification_token {

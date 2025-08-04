@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, Request, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Request, UseGuards } from '@nestjs/common';
 import { SignUpDto } from './dto/signup.dto';
 import { AuthService } from './auth.service';
 import { SignInDto } from './dto/signin.dto';
@@ -51,8 +51,18 @@ export class AuthController {
     @UseGuards(JWTGuard,SessionGuard)
     @Patch('/user/edit/basic')
     editBasicInfo(@Body() body:EditBasicUserInfoDto,@Request() req){
-        console.log(req.user)
         return this.auth_service.updateBasicInfo(body,req.user.user_id)
     }
+    @UseGuards(JWTGuard,SessionGuard)
+    @Patch('/user/mfa/enable')
+    EnableMFA(@Request() req,@Query("type") type:"email"|"phone"){
+        return this.auth_service.enablemfa(req.user.user_id,type)
+    }
+    @UseGuards(JWTGuard,SessionGuard)
+    @Patch('/user/mfa/disable')
+    DisableMFA(@Request() req,){
+        return this.auth_service.disablemfa(req.user.user_id)
+    }
+
 
 }

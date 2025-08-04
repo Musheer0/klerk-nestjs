@@ -16,6 +16,9 @@ import otpGenerator from 'otp-generator';
 import { scope, verification_token_scope } from '@prisma/client';
 import { RequestTokenDto } from './dto/request-token.dto';
 import { EditBasicUserInfoDto } from './dto/updatebasicUserInfo';
+import { sendWhatsAppCode } from 'src/lib/send-whatsapp-code';
+import { sendEmail } from 'src/lib/send-email';
+import { otpEmailTemplate } from './email/otp-email-template';
 
 export type Tjwt_session = {
   session: string;
@@ -65,13 +68,13 @@ export class AuthService {
   /**
    * 🔁 Reusable token creator for all scopes
    */
-  private async createVerificationToken(userId: string, scope: verification_token_scope) {
+  private async createVerificationToken(userId: string, scope: verification_token_scope,reciver:string,type?:"email"|"phone") {
     const otp = 'lookslim44'
 
     const verification = await this.db.verification_token.create({
       data: {
         identifier: userId,
-        token: process.env.NODE_ENV === 'production' ? otp : 'test_otp_123',
+        token: otp,
         scope,
         expires_at: new Date(Date.now() + 15 * 60 * 1000)
       }
@@ -79,6 +82,12 @@ export class AuthService {
 
     if (process.env.NODE_ENV !== 'production') {
       console.warn(`${scope.toUpperCase()} OTP (dev only):`, verification.token);
+    }
+    if(scope==='verify_phone_number' || type==='phone'){
+      await sendWhatsAppCode(otp, reciver)
+    }
+    else{
+      await sendEmail(reciver,otpEmailTemplate({otp}),'Verify your email')
     }
 
     return {
@@ -89,7 +98,7 @@ export class AuthService {
 
   async CreateUser(data: SignUpDto) {
     const { username, password, phone_number, email } = data;
-    if (!email && !phone_number) {
+    if (!email && !phone_number || email && phone_number) {
       throw new BadRequestException("Either email or phone number is required");
     }
 
@@ -123,7 +132,9 @@ export class AuthService {
       }
     });
 
-    const token = await this.createVerificationToken(new_user.id, email ? verification_token_scope.verify_email:verification_token_scope.verify_phone_number);
+    const token = await this.createVerificationToken(new_user.id, email ? verification_token_scope.verify_email:verification_token_scope.verify_phone_number,
+      new_user.primary_email||new_user.primary_phone_number!
+    );
 
     return {
       success: true,
@@ -166,7 +177,8 @@ await this.db.verification_token.deleteMany({
 
       const token = await this.createVerificationToken(
         user.id,
-        user.primary_email ? verification_token_scope.verify_email : verification_token_scope.verify_phone_number
+        user.primary_email ? verification_token_scope.verify_email : verification_token_scope.verify_phone_number,
+        user.primary_email||user.primary_phone_number!
       );
       return {
         success: true,
@@ -182,7 +194,9 @@ await this.db.verification_token.deleteMany({
       scope: verification_token_scope.mfa
     }
   });
-      const token = await this.createVerificationToken(user.id, verification_token_scope.mfa);
+      const token = await this.createVerificationToken(user.id, verification_token_scope.mfa,
+        user.primary_email||user.primary_phone_number!
+      );
       return {
         success: true,
         message: 'MFA OTP sent',
@@ -242,6 +256,27 @@ await this.db.verification_token.deleteMany({
         );
         return { success: true, message: 'Login successful', token: jwt_token };
       }
+      case 'enable_mfa':{
+          try {
+            const updated_user =await this.db.user.update({
+              where:{
+                id:user.id
+              },
+              data:{
+                mfa_enabled:true,
+                mfa_enabled_at: new Date(),
+                mfa_type:  user.primary_email ? 'email':'phone'
+              }
+            });
+            return {
+              success:true,
+              mfa_type: updated_user.mfa_type,
+              mfa_enabled:updated_user.mfa_enabled
+            }
+          } catch (error) {
+            throw new InternalServerErrorException("error enabling mfa try again")
+          }
+      }
 
       default:
         throw new BadRequestException(`Unknown token scope: ${token.scope}`);
@@ -295,7 +330,8 @@ await this.db.verification_token.deleteMany({
 
     const token = await this.createVerificationToken(
       user.id,
-      verification_token_scope.reset_password
+      verification_token_scope.reset_password,
+      user.primary_email||user.primary_phone_number!
     );
 
     return {
@@ -409,5 +445,55 @@ async updateBasicInfo(data:EditBasicUserInfoDto,userId:string){
       throw new InternalServerErrorException("internal server error")
     }
 }
-
+ async enablemfa  (userId:string,type:"email"|"phone"){
+  try {
+      const user = await this.db.user.findFirst({
+        where:{
+          id: userId
+        }
+      });
+      if(!user) throw new NotFoundException("invalid session");
+      if(type==='email'&& !user.is_email_verified || type==='phone' && !user.is_phone_number_verified) throw new BadRequestException(`please verifiy your ${type}`);
+       const token = await this.createVerificationToken(
+        user.id,
+        'enable_mfa',
+        type==='email'? user.primary_email! : user.primary_phone_number!,
+        type
+       );
+       return{
+        success:true,
+        ...token
+       }
+  } catch (error) {
+    console.error(error);
+    throw new InternalServerErrorException("error enabling mfa")
+  }
+ }
+ async disablemfa (userId:string){
+  try {
+      const user = await this.db.user.findFirst({
+        where:{
+          id: userId
+        }
+      });
+      if(!user) throw new NotFoundException("invalid session");
+      await this.db.user.update({
+        where:{
+          id:user.id
+        },
+        data:{
+          mfa_enabled:false,
+          mfa_enabled_at:null
+        }
+      });
+      return{
+        success:true,
+        message:'mfa disabled'
+      }
+  } catch (error) {
+    console.error(error);
+    throw new InternalServerErrorException("error enabling mfa")
+  }
+ }
+ 
 }
